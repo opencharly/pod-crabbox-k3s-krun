@@ -1,0 +1,56 @@
+# pod-crabbox-k3s-krun — the krun-guest k3s CachyOS lease image for the
+# Crabbox containerd provider.
+#
+# One repo per image (W5.2, opencharly/opencharly#869). The image imports the
+# k3s lease image at a PINNED tag, so the image tag and the git tag name the
+# same build: ghcr.io/opencharly/pod-crabbox-k3s-krun:<tag> is the tree
+# tagged <tag>.
+repo: github.com/opencharly/pod-crabbox-k3s-krun
+defaults:
+    platform:
+        - linux/amd64
+    tag: auto
+    registry: ghcr.io/opencharly
+    build:
+        - pac
+import: []
+discover:
+    - path: candy
+      recursive: true
+
+# The krun variant of the k3s image. Everything about the lease contract, the
+# systemd init, the inner containerd/krun stack and k3s is inherited from
+# `pod-crabbox-k3s`; this image adds the custom guest kernel and the metadata
+# that makes the host VMM boot it.
+pod-crabbox-k3s-krun:
+    candy:
+        description: |
+            The krun-guest CachyOS lease image for a Crabbox `containerd` lease:
+            the k3s control-plane `pod-crabbox-k3s` contract plus the
+            `libkrunfw-crabbox` guest kernel at `/krun/vmlinux` — an ELF image
+            for `krun.custom_kernel` with `kernel_format: 1` — and a
+            `/.krun_vm.json` naming it. The image carries the label
+            `crabbox.krun.network=passt`, so the provider runs it with
+            `krunNetwork: passt`. Nothing in the image starts a VMM: the host's
+            crun/krun boots this guest, and the guest itself runs the inherited
+            k3s control plane exactly as the base image does.
+        base: ghcr.io/opencharly/pod-crabbox-k3s:2026.309.0459
+        # An OCI base does not inherit the parent's distro/build values, so the
+        # CachyOS chain is declared here; the base image is itself CachyOS.
+        distro:
+            - cachyos
+            - arch
+        # systemd refuses to run in system mode as a non-root PID 1, so the image
+        # ends at USER root exactly as the base image does; the LOGIN user stays
+        # `crabbox` (uid 1000), created by the inherited candy.
+        user: root
+        uid: 0
+        gid: 0
+        # The `crabbox.krun.network=passt` label is declared by the `krun-lease`
+        # candy: `oci_label` is a candy capability, aggregated into this image at
+        # resolve time.
+        # systemd as PID 1, inherited from the base image.
+        entrypoint:
+            - /sbin/init
+        candy:
+            - krun-lease

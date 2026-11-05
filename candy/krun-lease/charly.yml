@@ -1,0 +1,176 @@
+# krun-lease — the krun guest kernel added by `pod-crabbox-k3s-krun` on top of
+# the `pod-crabbox-k3s` lease contract.
+#
+# Sources:
+#   - CONTAINERD-IMAGES.md §2, the `pod-crabbox-k3s-krun` row: the kernel at
+#     `/krun/vmlinux` (for `krun.custom_kernel`, `kernel_format: 1`) and
+#     `/.krun_vm.json` (`kernel_path`, `kernel_format`), plus the
+#     `crabbox.krun.network=passt` label the provider reads.
+#   - opencharly/layer-krun: the recipe is that layer's `files/build-kernel.sh`,
+#     fetched at the pinned tag `v2026.309.0542` — the SAME file the layer's own
+#     candy installs and runs (layer-krun#4), so there is one implementation. It
+#     builds libkrunfw v5.6.2's own sources, patches and stock config, `make
+#     vmlinux` only, and asserts every option after `olddefconfig` (LIBKRUN.md §7
+#     names CHECKPOINT_RESTORE and the socket diag options as the reason a stock
+#     libkrunfw kernel is not enough). The committed
+#     `config-libkrunfw-crabbox.fragment` is fetched from the same tag.
+#   - LIBKRUN.md §6: `kernel_path` and `kernel_format` are the `.krun_vm.json`
+#     keys crun hands to `krun_set_kernel`.
+#   - opencharly/pod-crabbox-nested for the inherited-contract probes this candy
+#     repeats at its own boundary.
+krun-lease:
+    candy:
+        description: |
+            The krun guest kernel for a CachyOS Crabbox lease. Builds the
+            `libkrunfw-crabbox` guest kernel from libkrunfw v5.6.2's own sources,
+            patches and stock config plus the committed fragment (downloaded from
+            the pinned `opencharly/layer-krun` tag), runs `make vmlinux` only, and
+            installs the resulting ELF image at `/krun/vmlinux`. It writes
+            `/.krun_vm.json` with `kernel_path: /krun/vmlinux` and
+            `kernel_format: 1`, so the host's crun/krun boots this guest instead
+            of the stock libkrunfw kernel. It starts no daemon and adds no
+            service: the guest runs the inherited k3s control plane unchanged.
+        # CONTAINERD-IMAGES.md §2, the `pod-crabbox-k3s-krun` row: the label the
+        # provider reads to select the passt network backend for a krun guest.
+        # `oci_label` lives under the candy's `capability:` block (a candy
+        # capability, aggregated into the image at resolve time).
+        capability:
+            oci_label:
+                crabbox.krun.network: passt
+        # The lease SSH port is the base image's own contract. An OCI base does not
+        # carry its candy chain's ports across the boundary, so the published number
+        # is restated here (one number, taken from the base image's label).
+        port:
+            - 2222
+        distro:
+            arch:
+                package:
+                    # The kernel toolchain, from opencharly/layer-krun's candy. The
+                    # final image keeps it on purpose: the kernel is built from a
+                    # pinned source tree, not installed from a package, so the same
+                    # image can rebuild the pin without a new base.
+                    - base-devel
+                    - git
+                    - curl
+                    - tar
+                    - xz
+                    - bc
+                    - perl
+                    - openssl
+                    - libelf
+                    - cpio
+                    - kmod
+                    - diffutils
+                    - rsync
+                    - python
+        plan:
+            # ------------------------------------------------------------------
+            # The committed kernel config fragment, pinned by the layer's tag.
+            # ------------------------------------------------------------------
+            - run: download the committed libkrunfw-crabbox config fragment from the pinned layer tag
+              id: krun-config-fragment
+              download: "https://raw.githubusercontent.com/opencharly/layer-krun/v2026.309.0542/config-libkrunfw-crabbox.fragment"
+              extract: none
+              to: /tmp/krun/config-libkrunfw-crabbox.fragment
+              mode: "0644"
+              run_as: root
+            - run: download the canonical guest-kernel build recipe from the same pinned layer tag
+              id: krun-kernel-recipe
+              download: "https://raw.githubusercontent.com/opencharly/layer-krun/v2026.309.0542/files/build-kernel.sh"
+              extract: none
+              to: /tmp/krun/build-kernel.sh
+              mode: "0755"
+              run_as: root
+            # ------------------------------------------------------------------
+            # The guest kernel: libkrunfw v5.6.2's sources + patches + config,
+            # plus the fragment, then `make vmlinux` only.
+            # ------------------------------------------------------------------
+            - run: build the libkrunfw-crabbox guest kernel (make vmlinux only)
+              id: krun-guest-kernel
+              context:
+                  - build
+              run_as: root
+              cache:
+                  - /var/cache/charly/krun-kernel
+              # The recipe is opencharly/layer-krun's files/build-kernel.sh, the ONE
+              # copy; its defaults are this image's cache, fragment and destination
+              # paths, so it needs no environment overrides.
+              command: /tmp/krun/build-kernel.sh
+            # ------------------------------------------------------------------
+            # The metadata crun hands to krun_set_kernel.
+            # ------------------------------------------------------------------
+            - run: write the krun VM metadata naming the custom kernel
+              id: krun-vm-json
+              write: /.krun_vm.json
+              run_as: root
+              mode: "0644"
+              content: |
+                {
+                  "kernel_path": "/krun/vmlinux",
+                  "kernel_format": 1
+                }
+            # ------------------------------------------------------------------
+            # The krun artifact surface, probed at THIS image's boundary.
+            # ------------------------------------------------------------------
+            - check: the custom guest kernel is installed at the fixed path
+              id: krun-kernel-installed
+              file:
+                  file: /krun/vmlinux
+                  exists: true
+                  mode: "0644"
+            - check: the guest kernel is an ELF image (a custom kernel that is not ELF is not a vmlinux)
+              id: krun-kernel-elf
+              exit_status: 0
+              command: sh -c 'test "$(head -c4 /krun/vmlinux | od -An -tx1 | tr -d " \n")" = 7f454c46'
+            - check: the guest kernel is a real kernel image, not an empty artifact
+              id: krun-kernel-size
+              exit_status: 0
+              command: test "$(stat -c %s /krun/vmlinux)" -gt 1048576
+            - check: /.krun_vm.json names the custom kernel path
+              id: krun-vm-json-kernel-path
+              file:
+                  file: /.krun_vm.json
+                  contains: '"kernel_path": "/krun/vmlinux"'
+            - check: /.krun_vm.json declares kernel_format 1
+              id: krun-vm-json-kernel-format
+              file:
+                  file: /.krun_vm.json
+                  contains: '"kernel_format": 1'
+            # ------------------------------------------------------------------
+            # The inherited k3s contract, probed at THIS image's boundary.
+            # ------------------------------------------------------------------
+            - check: the inherited k3s binary is installed
+              id: krun-k3s-binary
+              exit_status: 0
+              command: test -x /usr/local/bin/k3s
+            - check: the inherited k3s binary reports a pinned version
+              id: krun-k3s-version
+              exit_status: 0
+              stdout:
+                  - contains: "k3s version v1."
+              command: /usr/local/bin/k3s --version
+            - check: the inherited k3s config points at the inner containerd socket
+              id: krun-k3s-endpoint
+              exit_status: 0
+              command: >-
+                  grep -qx 'container-runtime-endpoint: unix:///run/containerd/containerd.sock' /etc/rancher/k3s/config.yaml
+            - check: the inherited k3s unit is enabled at boot
+              id: krun-k3s-unit-enabled
+              exit_status: 0
+              command: test "$(readlink /etc/systemd/system/multi-user.target.wants/k3s.service)" = /etc/systemd/system/k3s.service
+            - check: /sbin/init resolves to the systemd binary, so the image can boot systemd as PID 1
+              id: krun-systemd-init-binary
+              exit_status: 0
+              command: test "$(readlink -f /sbin/init)" = /usr/lib/systemd/systemd
+            - check: the inherited lease SSH contract is present (sshd, bootstrap, readiness hook)
+              id: krun-lease-binaries
+              exit_status: 0
+              command: >-
+                  test -x /usr/sbin/sshd &&
+                  test -x /usr/local/libexec/crabbox/bootstrap.sh &&
+                  test -x /usr/local/libexec/crabbox/ready
+            - check: the inherited lease login user is crabbox at uid 1000
+              id: krun-lease-user
+              exit_status: 0
+              command: >-
+                  test "$(getent passwd 1000 | cut -d: -f1)" = crabbox
