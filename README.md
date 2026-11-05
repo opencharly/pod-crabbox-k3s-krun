@@ -50,9 +50,10 @@ must pass `/dev/kvm` to the VMM; the image cannot do that for itself.
 ## Requirements and limits
 
 - **The image build needs network.** `libkrunfw`'s Makefile fetches the
-  `linux-6.12.109` source tarball, and the pinned config fragment is fetched
-  from `raw.githubusercontent.com` at the `layer-krun` tag. Both are pinned
-  URLs; neither is resolved from a mutable branch.
+  `linux-6.12.109` source tarball, and the recipe (`files/build-kernel.sh`) plus
+  the config fragment are fetched from `raw.githubusercontent.com` at the same
+  pinned `layer-krun` tag (`v2026.309.0542`). All three are pinned URLs; none is
+  resolved from a mutable branch.
 - **The kernel is not a distro package.** No Arch/CachyOS package ships the
   `libkrunfw-crabbox` kernel this image needs, which is why the layer builds it.
   The toolchain stays in the image so the pin can be rebuilt without a new base.

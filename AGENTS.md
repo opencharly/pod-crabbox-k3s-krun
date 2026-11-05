@@ -12,10 +12,10 @@ change to any of them lands there, not here.
 Canonical files:
 
 - `charly.yml` — the image: `base: ghcr.io/opencharly/pod-crabbox-k3s` at a
-  pinned tag, `oci_label: {crabbox.krun.network: passt}`,
-  `entrypoint: [/sbin/init]`, `user: root`.
-- `candy/krun-lease/charly.yml` — the kernel build, the VM metadata and the
-  `check:` steps.
+  pinned tag, `entrypoint: [/sbin/init]`, `user: root`.
+- `candy/krun-lease/charly.yml` — the downloaded kernel recipe and fragment,
+  the `capability.oci_label` block (where `crabbox.krun.network=passt` lives),
+  the VM metadata and the `check:` steps.
 - `.github/workflows/image.yml` — the image build; it triggers on
   `tag-on-merge` **completion** (`workflow_run`), never on `push: tags`
   (`opencharly/.github#277`). The `tag-on-merge.yml` caller is installed on

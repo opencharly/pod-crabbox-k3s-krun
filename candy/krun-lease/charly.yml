@@ -6,12 +6,14 @@
 #     `/krun/vmlinux` (for `krun.custom_kernel`, `kernel_format: 1`) and
 #     `/.krun_vm.json` (`kernel_path`, `kernel_format`), plus the
 #     `crabbox.krun.network=passt` label the provider reads.
-#   - opencharly/layer-krun's candy: the kernel is built from libkrunfw v5.6.2's
-#     OWN sources, patches and stock config plus the committed
-#     `config-libkrunfw-crabbox.fragment`, with `make vmlinux` only — the recipe
-#     and the post-`olddefconfig` option assertions are this image's, taken from
-#     that layer verbatim (LIBKRUN.md §7 names CHECKPOINT_RESTORE and the socket
-#     diag options as the reason a stock libkrunfw kernel is not enough).
+#   - opencharly/layer-krun: the recipe is that layer's `files/build-kernel.sh`,
+#     fetched at the pinned tag `v2026.309.0542` — the SAME file the layer's own
+#     candy installs and runs (layer-krun#4), so there is one implementation. It
+#     builds libkrunfw v5.6.2's own sources, patches and stock config, `make
+#     vmlinux` only, and asserts every option after `olddefconfig` (LIBKRUN.md §7
+#     names CHECKPOINT_RESTORE and the socket diag options as the reason a stock
+#     libkrunfw kernel is not enough). The committed
+#     `config-libkrunfw-crabbox.fragment` is fetched from the same tag.
 #   - LIBKRUN.md §6: `kernel_path` and `kernel_format` are the `.krun_vm.json`
 #     keys crun hands to `krun_set_kernel`.
 #   - opencharly/pod-crabbox-nested for the inherited-contract probes this candy
