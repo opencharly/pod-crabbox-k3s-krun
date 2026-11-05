@@ -1,0 +1,230 @@
+# krun-lease — the krun guest kernel added by `pod-crabbox-k3s-krun` on top of
+# the `pod-crabbox-k3s` lease contract.
+#
+# Sources:
+#   - CONTAINERD-IMAGES.md §2, the `pod-crabbox-k3s-krun` row: the kernel at
+#     `/krun/vmlinux` (for `krun.custom_kernel`, `kernel_format: 1`) and
+#     `/.krun_vm.json` (`kernel_path`, `kernel_format`), plus the
+#     `crabbox.krun.network=passt` label the provider reads.
+#   - opencharly/layer-krun's candy: the kernel is built from libkrunfw v5.6.2's
+#     OWN sources, patches and stock config plus the committed
+#     `config-libkrunfw-crabbox.fragment`, with `make vmlinux` only — the recipe
+#     and the post-`olddefconfig` option assertions are this image's, taken from
+#     that layer verbatim (LIBKRUN.md §7 names CHECKPOINT_RESTORE and the socket
+#     diag options as the reason a stock libkrunfw kernel is not enough).
+#   - LIBKRUN.md §6: `kernel_path` and `kernel_format` are the `.krun_vm.json`
+#     keys crun hands to `krun_set_kernel`.
+#   - opencharly/pod-crabbox-nested for the inherited-contract probes this candy
+#     repeats at its own boundary.
+krun-lease:
+    candy:
+        description: |
+            The krun guest kernel for a CachyOS Crabbox lease. Builds the
+            `libkrunfw-crabbox` guest kernel from libkrunfw v5.6.2's own sources,
+            patches and stock config plus the committed fragment (downloaded from
+            the pinned `opencharly/layer-krun` tag), runs `make vmlinux` only, and
+            installs the resulting ELF image at `/krun/vmlinux`. It writes
+            `/.krun_vm.json` with `kernel_path: /krun/vmlinux` and
+            `kernel_format: 1`, so the host's crun/krun boots this guest instead
+            of the stock libkrunfw kernel. It starts no daemon and adds no
+            service: the guest runs the inherited k3s control plane unchanged.
+        # CONTAINERD-IMAGES.md §2, the `pod-crabbox-k3s-krun` row: the label the
+        # provider reads to select the passt network backend for a krun guest.
+        # `oci_label` lives under the candy's `capability:` block (a candy
+        # capability, aggregated into the image at resolve time).
+        capability:
+            oci_label:
+                crabbox.krun.network: passt
+        # The lease SSH port is the base image's own contract. An OCI base does not
+        # carry its candy chain's ports across the boundary, so the published number
+        # is restated here (one number, taken from the base image's label).
+        port:
+            - 2222
+        distro:
+            arch:
+                package:
+                    # The kernel toolchain, from opencharly/layer-krun's candy. The
+                    # final image keeps it on purpose: the kernel is built from a
+                    # pinned source tree, not installed from a package, so the same
+                    # image can rebuild the pin without a new base.
+                    - base-devel
+                    - git
+                    - curl
+                    - tar
+                    - xz
+                    - bc
+                    - perl
+                    - openssl
+                    - libelf
+                    - cpio
+                    - kmod
+                    - diffutils
+                    - rsync
+                    - python
+        plan:
+            # ------------------------------------------------------------------
+            # The committed kernel config fragment, pinned by the layer's tag.
+            # ------------------------------------------------------------------
+            - run: download the committed libkrunfw-crabbox config fragment from the pinned layer tag
+              id: krun-config-fragment
+              download: "https://raw.githubusercontent.com/opencharly/layer-krun/v2026.307.1758/config-libkrunfw-crabbox.fragment"
+              extract: none
+              to: /tmp/krun/config-libkrunfw-crabbox.fragment
+              mode: "0644"
+              run_as: root
+            # ------------------------------------------------------------------
+            # The guest kernel: libkrunfw v5.6.2's sources + patches + config,
+            # plus the fragment, then `make vmlinux` only.
+            # ------------------------------------------------------------------
+            - run: build the libkrunfw-crabbox guest kernel (make vmlinux only)
+              id: krun-guest-kernel
+              context:
+                  - build
+              run_as: root
+              cache:
+                  - /var/cache/charly/krun-kernel
+              command: |
+                  set -eu
+                  cache=/var/cache/charly/krun-kernel
+                  kfw=$cache/libkrunfw
+                  fragment=/tmp/krun/config-libkrunfw-crabbox.fragment
+                  if [ ! -d "$kfw/.git" ]; then
+                    git clone --depth 1 --branch v5.6.2 https://github.com/containers/libkrunfw "$kfw"
+                  fi
+                  cd "$kfw"
+                  # The box bootstrap exports ARCH=amd64 (the OCI TARGETARCH).
+                  # libkrunfw's Makefile treats a NON-EMPTY ARCH as the KERNEL's
+                  # arch spelling and derives GUESTARCH=$(ARCH), so it copies
+                  # config-libkrunfw_amd64 — which does not exist (the file is
+                  # config-libkrunfw_x86_64). Use the kernel spelling here.
+                  case "$(uname -m)" in
+                    x86_64) karch=x86_64 ;;
+                    aarch64|arm64) karch=arm64 ;;
+                    riscv64) karch=riscv ;;
+                    *) karch="$(uname -m)" ;;
+                  esac
+                  export ARCH="$karch"
+                  # A killed or failed build can leave the extracted tree without
+                  # the stock .config. The directory target would then read as
+                  # "up to date", skip the config copy, and the fragment below
+                  # would be appended to an empty .config. Force a clean extract in
+                  # that state.
+                  if [ ! -s linux-6.12.109/.config ]; then
+                    rm -rf linux-6.12.109
+                  fi
+                  # libkrunfw's OWN Makefile downloads linux-6.12.109, applies ITS
+                  # patches and copies ITS stock config, then runs olddefconfig.
+                  make linux-6.12.109
+                  if ! grep -q 'CHARLY_LIBKRUNFW_CRABBOX' linux-6.12.109/.config; then
+                    printf '\n# CHARLY_LIBKRUNFW_CRABBOX\n' >> linux-6.12.109/.config
+                    cat "$fragment" >> linux-6.12.109/.config
+                  fi
+                  make -C linux-6.12.109 olddefconfig
+                  # The fragment is only real if olddefconfig KEPT it. Assert every
+                  # option and fail the build when a dependency is missing, rather
+                  # than ship a silently reduced kernel whose gaps surface later as
+                  # "Diag module missing (-2)".
+                  missing=""
+                  for opt in CHECKPOINT_RESTORE INET_DIAG UNIX_DIAG NETLINK_DIAG PACKET_DIAG \
+                             NETFILTER NETFILTER_ADVANCED NF_CONNTRACK NF_NAT NF_TABLES \
+                             NETFILTER_XTABLES NFT_COMPAT NFT_NUMGEN \
+                             IP_NF_IPTABLES IP_NF_FILTER IP_NF_MANGLE IP_NF_NAT \
+                             IP_NF_TARGET_MASQUERADE IP_NF_TARGET_REJECT \
+                             NETFILTER_XT_MATCH_MULTIPORT NETFILTER_XT_MATCH_COMMENT \
+                             NETFILTER_XT_MATCH_CONNTRACK NETFILTER_XT_MATCH_ADDRTYPE \
+                             NETFILTER_XT_MATCH_MARK NETFILTER_XT_MATCH_TCPMSS \
+                             NETFILTER_XT_TARGET_MASQUERADE NETFILTER_XT_TARGET_MARK \
+                             IP_SET IP_VS IP_VS_PROTO_TCP IP_VS_PROTO_UDP IP_VS_NFCT IP_VS_RR \
+                             VXLAN IP_ADVANCED_ROUTER IP_MULTIPLE_TABLES; do
+                    grep -qx "CONFIG_$opt=y" linux-6.12.109/.config || missing="$missing CONFIG_$opt"
+                  done
+                  if grep -qx 'CONFIG_BASE_SMALL=y' linux-6.12.109/.config; then
+                    missing="$missing CONFIG_BASE_SMALL=n"
+                  fi
+                  if [ -n "$missing" ]; then
+                    echo "the merged kernel config did not keep:$missing" >&2
+                    echo "a required option was dropped by olddefconfig - its dependency is missing" >&2
+                    exit 1
+                  fi
+                  make -C linux-6.12.109 -j"$(nproc)" vmlinux
+                  install -d -m 0755 /krun
+                  install -m 0644 linux-6.12.109/vmlinux /krun/vmlinux
+                  echo "/krun/vmlinux: $(stat -c %s /krun/vmlinux) bytes"
+            # ------------------------------------------------------------------
+            # The metadata crun hands to krun_set_kernel.
+            # ------------------------------------------------------------------
+            - run: write the krun VM metadata naming the custom kernel
+              id: krun-vm-json
+              write: /.krun_vm.json
+              run_as: root
+              mode: "0644"
+              content: |
+                {
+                  "kernel_path": "/krun/vmlinux",
+                  "kernel_format": 1
+                }
+            # ------------------------------------------------------------------
+            # The krun artifact surface, probed at THIS image's boundary.
+            # ------------------------------------------------------------------
+            - check: the custom guest kernel is installed at the fixed path
+              id: krun-kernel-installed
+              file:
+                  file: /krun/vmlinux
+                  exists: true
+                  mode: "0644"
+            - check: the guest kernel is an ELF image (a custom kernel that is not ELF is not a vmlinux)
+              id: krun-kernel-elf
+              exit_status: 0
+              command: sh -c 'test "$(head -c4 /krun/vmlinux | od -An -tx1 | tr -d " \n")" = 7f454c46'
+            - check: the guest kernel is a real kernel image, not an empty artifact
+              id: krun-kernel-size
+              exit_status: 0
+              command: test "$(stat -c %s /krun/vmlinux)" -gt 1048576
+            - check: /.krun_vm.json names the custom kernel path
+              id: krun-vm-json-kernel-path
+              file:
+                  file: /.krun_vm.json
+                  contains: '"kernel_path": "/krun/vmlinux"'
+            - check: /.krun_vm.json declares kernel_format 1
+              id: krun-vm-json-kernel-format
+              file:
+                  file: /.krun_vm.json
+                  contains: '"kernel_format": 1'
+            # ------------------------------------------------------------------
+            # The inherited k3s contract, probed at THIS image's boundary.
+            # ------------------------------------------------------------------
+            - check: the inherited k3s binary is installed
+              id: krun-k3s-binary
+              exit_status: 0
+              command: test -x /usr/local/bin/k3s
+            - check: the inherited k3s binary reports a pinned version
+              id: krun-k3s-version
+              exit_status: 0
+              stdout:
+                  - contains: "k3s version v1."
+              command: /usr/local/bin/k3s --version
+            - check: the inherited k3s config points at the inner containerd socket
+              id: krun-k3s-endpoint
+              exit_status: 0
+              command: >-
+                  grep -qx 'container-runtime-endpoint: unix:///run/containerd/containerd.sock' /etc/rancher/k3s/config.yaml
+            - check: the inherited k3s unit is enabled at boot
+              id: krun-k3s-unit-enabled
+              exit_status: 0
+              command: test "$(readlink /etc/systemd/system/multi-user.target.wants/k3s.service)" = /etc/systemd/system/k3s.service
+            - check: /sbin/init resolves to the systemd binary, so the image can boot systemd as PID 1
+              id: krun-systemd-init-binary
+              exit_status: 0
+              command: test "$(readlink -f /sbin/init)" = /usr/lib/systemd/systemd
+            - check: the inherited lease SSH contract is present (sshd, bootstrap, readiness hook)
+              id: krun-lease-binaries
+              exit_status: 0
+              command: >-
+                  test -x /usr/sbin/sshd &&
+                  test -x /usr/local/libexec/crabbox/bootstrap.sh &&
+                  test -x /usr/local/libexec/crabbox/ready
+            - check: the inherited lease login user is crabbox at uid 1000
+              id: krun-lease-user
+              exit_status: 0
+              command: >-
+                  test "$(getent passwd 1000 | cut -d: -f1)" = crabbox
